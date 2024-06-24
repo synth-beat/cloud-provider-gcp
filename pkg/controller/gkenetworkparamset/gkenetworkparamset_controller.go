@@ -406,12 +406,33 @@ func (c *Controller) syncGNP(ctx context.Context, params *networkv1.GKENetworkPa
 	}
 
 	addFinalizerInPlace(params)
-	subnet, subnetValidation := c.getAndValidateSubnet(ctx, params)
-	meta.SetStatusCondition(&params.Status.Conditions, subnetValidation.toCondition())
-	if !subnetValidation.IsValid {
+
+	// Validate that the fields given are a valid combination.
+	presenceValidation := c.validateFieldPresence(ctx, params)
+	if !presenceValidation.IsValid {
+		meta.SetStatusCondition(&params.Status.Conditions, presenceValidation.toCondition())
 		return nil
 	}
 
+	// Validate specific fields once field combination is valid.
+	netAttachment := params.Spec.NetworkAttachment
+	if netAttachment != "" {
+		networkAttachmentValidation := c.validateNetworkAttachment(ctx, netAttachment)
+		meta.SetStatusCondition(&params.Status.Conditions, networkAttachmentValidation.toCondition())
+		if !networkAttachmentValidation.IsValid {
+			return nil
+		}
+
+		return c.getAndSyncNetworkForGNP(ctx, params)
+	}
+
+	subnet, subnetValidation := c.getAndValidateSubnet(ctx, params)
+	if !subnetValidation.IsValid {
+		meta.SetStatusCondition(&params.Status.Conditions, subnetValidation.toCondition())
+		return nil
+	}
+
+	// Validate further interaction of different fields.
 	paramsValidation, err := c.validateGKENetworkParamSet(ctx, params, subnet)
 	if err != nil {
 		return err
@@ -436,6 +457,12 @@ func (c *Controller) syncGNP(ctx context.Context, params *networkv1.GKENetworkPa
 		CIDRBlocks: cidrs,
 	}
 
+	return c.getAndSyncNetworkForGNP(ctx, params)
+}
+
+// getAndSyncNetworkForGNP gets the network that refers to this GNP object, and then does the cross sync of Network
+// with GNP
+func (c *Controller) getAndSyncNetworkForGNP(ctx context.Context, params *networkv1.GKENetworkParamSet) error {
 	network, err := c.getNetworkReferringToGNP(params.Name)
 	if err != nil {
 		return err
